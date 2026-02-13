@@ -36,7 +36,6 @@ class ProGateway:
         self.log.debug('Gateway: %s, pid: %s', host, self.pid)
 
     def add_setup(self, domain: str, handler):
-        """Add hass entity setup function."""
         if '.' in domain:
             _, domain = domain.rsplit('.', 1)
         self.setups[domain] = handler
@@ -59,7 +58,6 @@ class ProGateway:
 
         self.log.info('Setup device: %s', [device.unique_id, device.name, device])
 
-        # don't setup device from second gateway
         if len(device.gateways) > 1:
             return
         await device.setup_entities()
@@ -78,11 +76,19 @@ class ProGateway:
             except asyncio.TimeoutError:
                 return None
 
-        await self.topology()
+        await self.topology(wait_result=True)
 
     async def stop(self, *args):
         if self.main_task and not self.main_task.cancelled():
             self.main_task.cancel()
+
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
+            self.writer = None
 
         for device in self.devices.values():
             if self in device.gateways:
@@ -163,7 +169,7 @@ class ProGateway:
         else:
             self.log.info('Gateway message: %s', [cid, dat])
 
-        if is_topology := cmd in ['gateway_post.topology']:
+        if is_topology := cmd in ['gateway_post.topology', 'device_post.topology']:
             if not self.device:
                 self.device = GatewayDevice(self)
                 await self.add_device(self.device)
@@ -171,25 +177,33 @@ class ProGateway:
         if not nodes and 'params' in dat:
             nodes = [dat['params']]
 
-        for node in nodes:
+        async def process_node(node):
             if not (nid := node.get('id')):
-                continue
+                return
             if is_topology:
-                # node list
                 await XDevice.from_node(self, node)
-            if cmd in ['getway_post.topology'] and not self.device:
-                # wifi full screen panel
+                if node.get('nt') == 6:
+                    return
+            if cmd in ['device_post.topology'] and not self.device:
                 self.device = WifiPanelDevice(node)
                 await self.add_device(self.device)
-            if not (dvc := self.devices.get(nid)):
-                self.log.warning('Device not found: %s', node)
-                continue
+            if node.get('nt') == 6 and self.device:
+                dvc = self.device
+            elif not (dvc := self.devices.get(nid)):
+                await XDevice.from_node(self, node)
+                dvc = self.devices.get(nid)
+                if not dvc:
+                    if node.get('nt') == 6:
+                        return
+                    self.log.warning('Device not found: %s', node)
+                    return
             if cmd in ['gateway_post.prop', 'device_post.prop']:
-                # node prop
                 await dvc.prop_changed(node)
             if cmd in ['gateway_post.event', 'device_post.event']:
-                # node event
                 await dvc.event_fired(node)
+
+        if nodes:
+            await asyncio.gather(*(process_node(node) for node in nodes))
 
     async def send(self, method, wait_result=True, **kwargs):
         if not self.writer:

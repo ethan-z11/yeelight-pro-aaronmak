@@ -1,7 +1,7 @@
-"""Support for switch."""
 import logging
 
 from homeassistant.core import callback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.components.switch import (
     SwitchEntity,
     DOMAIN as ENTITY_DOMAIN,
@@ -34,7 +34,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     await async_add_setuper(hass, config or discovery_info, ENTITY_DOMAIN, setuper(async_add_entities))
 
 
-class XSwitchEntity(XEntity, SwitchEntity):
+class XSwitchEntity(XEntity, SwitchEntity, RestoreEntity):
     _attr_is_on = None
 
     @callback
@@ -45,18 +45,19 @@ class XSwitchEntity(XEntity, SwitchEntity):
             self._attr_is_on = data[self._name]
 
     async def async_turn_on(self, **kwargs):
-        """Turn the entity on."""
         return await self.async_turn(True, **kwargs)
 
     async def async_turn_off(self, **kwargs):
-        """Turn the entity off."""
         return await self.async_turn(False, **kwargs)
 
     async def async_turn(self, on=True, **kwargs):
-        """Turn the entity on/off."""
         kwargs[self._name] = on
         ret = await self.device_send_props(kwargs)
         if ret:
             self._attr_is_on = on
             self.async_write_ha_state()
         return ret
+
+    @callback
+    def async_restore_last_state(self, state: str, attrs: dict):
+        self._attr_is_on = state == 'on'

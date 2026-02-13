@@ -1,4 +1,3 @@
-"""Support for binary sensor."""
 import logging
 
 from homeassistant.core import callback
@@ -56,6 +55,8 @@ class XBinarySensorEntity(XEntity, BinarySensorEntity, RestoreEntity):
                 self._attr_extra_state_attributes[k] = v
 
         if self._name == 'motion':
+            self._attr_device_class = BinarySensorDeviceClass.MOTION
+        if self._name == 'approach':
             self._attr_device_class = BinarySensorDeviceClass.MOTION
         if self._name == 'contact':
             self._attr_device_class = BinarySensorDeviceClass.DOOR

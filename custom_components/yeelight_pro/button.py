@@ -1,4 +1,3 @@
-"""Support for button."""
 import logging
 
 from homeassistant.components.button import (
@@ -48,5 +47,4 @@ class XSceneEntity(XButtonEntity):
         self._attr_name = conv.node.get('n') or conv.attr
 
     async def async_press(self):
-        """Press the button."""
         await self.device.gateway.send('gateway_set.prop', scenes=[{'id': self._attr_id}])

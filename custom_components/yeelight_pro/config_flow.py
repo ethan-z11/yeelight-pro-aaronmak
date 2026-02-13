@@ -41,22 +41,18 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors['base'] = 'cannot_access'
         return self.async_show_form(
             step_id='user',
-            data_schema=vol.Schema({
-                **get_flow_schema(user_input),
-                vol.Required(CONF_PID, default=user_input.get(CONF_PID, PID_GATEWAY)): vol.In(GATEWAY_TYPES),
-            }),
+            data_schema=vol.Schema(get_flow_schema(user_input)),
             errors=errors,
             description_placeholders={'tip': self.context.pop('last_error', '')},
         )
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    def __init__(self, config_entry):
-        self._entry_id = config_entry.entry_id
+    def __init__(self, config_entry: config_entries.ConfigEntry):
+        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
-        config_entry = self.hass.config_entries.async_get_entry(self._entry_id)
         errors = {}
         if user_input is None:
             user_input = {}
@@ -66,13 +62,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     self.context['last_error'] = str(err)
                 else:
                     self.hass.config_entries.async_update_entry(
-                        config_entry, data={**config_entry.data, **user_input}
+                        self.config_entry, data={**self.config_entry.data, **user_input}
                     )
                     return self.async_create_entry(title='', data={})
             errors['base'] = 'cannot_access'
         user_input = {
-            **config_entry.data,
-            **config_entry.options,
+            **self.config_entry.data,
+            **self.config_entry.options,
             **user_input,
         }
         return self.async_show_form(

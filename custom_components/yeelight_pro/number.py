@@ -1,4 +1,3 @@
-"""Support for number."""
 import logging
 import asyncio
 

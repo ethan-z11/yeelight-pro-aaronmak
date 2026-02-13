@@ -1,11 +1,9 @@
-"""The component."""
-import json
-import ast
 import logging
 import asyncio
 import datetime
 import voluptuous as vol
 
+from homeassistant.helpers import service
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.const import (
     CONF_HOST,
@@ -21,8 +19,6 @@ from homeassistant.helpers.reload import (
 from homeassistant.components import persistent_notification
 import homeassistant.helpers.device_registry as dr
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.service import async_register_admin_service
-
 
 from .core.const import *
 from .core.gateway import ProGateway
@@ -94,12 +90,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     unload_ok = await hass.config_entries.async_unload_platforms(entry, SUPPORTED_DOMAINS)
     if unload_ok:
-        gtw = hass.data[DOMAIN][CONF_GATEWAYS].pop(entry.entry_id, None)
-        if gtw:
+        gtw = hass.data[DOMAIN][CONF_GATEWAYS].get(entry.entry_id)
+        if isinstance(gtw, ProGateway):
             await gtw.stop()
+            hass.data[DOMAIN][CONF_GATEWAYS].pop(entry.entry_id)
+
     return unload_ok
 
 
@@ -151,8 +149,8 @@ class ComponentServices:
     def __init__(self, hass: HomeAssistant):
         self.hass = hass
 
-        async_register_admin_service(
-            hass, DOMAIN, SERVICE_RELOAD, self.handle_reload_config,
+        service.async_register_admin_service(
+            hass, DOMAIN, SERVICE_RELOAD, self.handle_reload_config
         )
 
         hass.services.async_register(
@@ -164,15 +162,6 @@ class ComponentServices:
                 vol.Optional('throw', default=False): cv.boolean,
             }),
         )
-
-        hass.services.async_register(
-            DOMAIN, 'mock_incoming_message', self.async_mock_incoming_message,
-            schema=vol.Schema({
-                vol.Optional(CONF_HOST): cv.string,
-                vol.Required('message'): cv.string,
-            }),
-        )
-
 
     async def handle_reload_config(self, call):
         config = await async_integration_yaml_config(self.hass, DOMAIN)
@@ -215,43 +204,7 @@ class ComponentServices:
         })
         return rdt
 
-    async def async_mock_incoming_message(self, call):
-        dat = call.data or {}
-        gip = dat.get(CONF_HOST)
-        gtw = None
-        for g in self.hass.data[DOMAIN][CONF_GATEWAYS].values():
-            if not isinstance(g, ProGateway):
-                continue
-            if g.host == gip or not gip:
-                gtw = g
-                break
-        if not gtw:
-            _LOGGER.warning('Gateway %s not found.', gip)
-            return False
-        message = dat['message']
 
-        # 兼容python字典打印复制
-        try:
-            msg = json.loads(message)
-        except json.JSONDecodeError:
-            try:
-                msg = ast.literal_eval(message)
-            except (ValueError, SyntaxError):
-                msg = None
-                
-        if not isinstance(msg, dict):
-            title = 'Yeelight Pro mock incoming message'
-            err_info = f'❌ Format error: {message}\n\n'
-            err_info += '''✅JSON: {"id": 8218, "method": "gateway_post.event", "nodes": [{"params": {}, "value": "motion.false", "id": 301809111, "nt": 2}]}\n'''
-            err_info += '''✅PYTHON: {'id': 8218, 'method': 'gateway_post.event', 'nodes': [{'params': {}, 'value': 'motion.false', 'id': 301809111, 'nt': 2}]}\n'''
-            persistent_notification.async_create(
-                self.hass, err_info, title=title, notification_id=f'{DOMAIN}-debug',
-            )
-            return False
-        message = json.dumps(msg)
-        _LOGGER.info('Mock message: %s', message)
-        await gtw.on_message(message.encode('utf-8'))
-        
 class XEntity(Entity):
     added = False
     _attr_should_poll = False
@@ -260,16 +213,16 @@ class XEntity(Entity):
         self.device = device
         self.hass = device.hass
         self._name = conv.attr
-        self._option = option or {}
-        self._attr_name = f'{device.name} {conv.attr}'.strip()
+        self._option = (option or getattr(conv, 'option', {}))
+        self._attr_name = self._option.get('name', f'{device.name} {conv.attr}'.strip())
         self._attr_unique_id = f'{device.id}-{conv.attr}'
         self.entity_id = device.entity_id(conv)
         self._attr_icon = self._option.get('icon')
         self._attr_entity_picture = self._option.get('picture')
-        self._attr_device_class = self._option.get('class') or conv.device_class
-        self._attr_native_unit_of_measurement = conv.unit_of_measurement
+        self._attr_device_class = self._option.get('class')
         self._attr_entity_category = self._option.get('category')
         self._attr_translation_key = self._option.get('translation_key', conv.attr)
+        self._attr_native_unit_of_measurement = self._option.get('unit')
 
         via_device = None
         if not isinstance(device, (GatewayDevice, WifiPanelDevice)):
@@ -288,12 +241,10 @@ class XEntity(Entity):
         device.entities[conv.attr] = self
 
     async def async_added_to_hass(self):
-        """Run when entity about to be added to hass."""
         if hasattr(self, 'async_get_last_state'):
             state: State = await self.async_get_last_state()
             if state:
                 self.async_restore_last_state(state.state, state.attributes)
-
         self.added = True
         await super().async_added_to_hass()
 
@@ -304,7 +255,6 @@ class XEntity(Entity):
 
     @callback
     def async_set_state(self, data: dict):
-        """Handle state update from gateway."""
         if self._name in data:
             self._attr_state = data[self._name]
         for k in self.subscribed_attrs:

@@ -1,4 +1,3 @@
-"""Support for sensor."""
 import logging
 import asyncio
 

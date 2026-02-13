@@ -1,16 +1,15 @@
-"""Support for light."""
 import logging
 import asyncio
 import time
 
 from homeassistant.core import callback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.components.light import (
     LightEntity,
     DOMAIN as ENTITY_DOMAIN,
     ColorMode,
     LightEntityFeature,
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_RGB_COLOR,
     ATTR_TRANSITION,
@@ -43,18 +42,17 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     await async_add_setuper(hass, config or discovery_info, ENTITY_DOMAIN, setuper(async_add_entities))
 
 
-class XLightEntity(XEntity, LightEntity):
+class XLightEntity(XEntity, LightEntity, RestoreEntity):
     _attr_is_on = None
     target_task: asyncio.Task = None
 
     def __init__(self, device: XDevice, conv: Converter, option=None):
         super().__init__(device, conv, option)
 
-        # https://developers.home-assistant.io/docs/core/entity/light/#color-modes
         self._attr_supported_color_modes = set()
         if device.converters.get(ATTR_RGB_COLOR):
             self._attr_supported_color_modes.add(ColorMode.RGB)
-        if cov := device.converters.get(ATTR_COLOR_TEMP):
+        if cov := device.converters.get('color_temp'):
             self._attr_supported_color_modes.add(ColorMode.COLOR_TEMP)
             if hasattr(cov, 'minm') and hasattr(cov, 'maxm'):
                 self._attr_min_mireds = cov.minm
@@ -81,15 +79,15 @@ class XLightEntity(XEntity, LightEntity):
         if self.target_task:
             self.target_task.cancel()
         diff = time.time() - self._target_attrs.get('time', 0)
-        delay = float(self._target_attrs.get(ATTR_TRANSITION) or 5)
+        delay = float(self._target_attrs.get(ATTR_TRANSITION) or 0)
 
         async def set_state():
-            await asyncio.sleep(delay - diff + 0.01)
-            self.async_set_state(data)
+            await asyncio.sleep(max(0, delay - diff + 0.01))
+            super().async_set_state(data)
             self.async_write_ha_state()
 
-        if diff < delay:
-            check_attrs = [self._name, ATTR_BRIGHTNESS, ATTR_COLOR_TEMP, ATTR_COLOR_TEMP_KELVIN]
+        if delay > 0 and diff < delay:
+            check_attrs = [ATTR_BRIGHTNESS, 'color_temp', ATTR_COLOR_TEMP_KELVIN]
             for k in check_attrs:
                 if k not in data:
                     continue
@@ -109,32 +107,68 @@ class XLightEntity(XEntity, LightEntity):
             self._attr_is_on = data[self._name]
         if ATTR_BRIGHTNESS in data:
             self._attr_brightness = data[ATTR_BRIGHTNESS]
-        if ATTR_COLOR_TEMP in data:
-            self._attr_color_temp = data[ATTR_COLOR_TEMP]
+        if ATTR_COLOR_TEMP_KELVIN in data:
+            self._attr_color_temp_kelvin = data[ATTR_COLOR_TEMP_KELVIN]
+            try:
+                self._attr_color_temp = int(1000000 / float(self._attr_color_temp_kelvin))
+            except Exception:
+                pass
+        elif 'color_temp' in data:
+            self._attr_color_temp = data['color_temp']
+            try:
+                self._attr_color_temp_kelvin = int(1000000 / float(self._attr_color_temp))
+            except Exception:
+                pass
         if ATTR_RGB_COLOR in data:
             self._attr_rgb_color = data[ATTR_RGB_COLOR]
+        if ATTR_RGB_COLOR in data:
+            self._attr_color_mode = ColorMode.RGB
+        elif (ATTR_COLOR_TEMP_KELVIN in data) or ('color_temp' in data):
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+        
+        if self._attr_is_on and self._attr_color_mode is None:
+            if ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+            elif ColorMode.RGB in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.RGB
+            elif ColorMode.BRIGHTNESS in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.BRIGHTNESS
+            elif ColorMode.ONOFF in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.ONOFF
 
     async def async_turn_on(self, **kwargs):
-        """Turn the entity on."""
         kwargs[self._name] = True
+        if ATTR_COLOR_TEMP_KELVIN in kwargs and 'color_temp' not in kwargs:
+            try:
+                _kelvin = int(kwargs.pop(ATTR_COLOR_TEMP_KELVIN))
+                kwargs['color_temp'] = int(1000000 / float(_kelvin))
+            except Exception:
+                pass
         self._target_attrs = {
             **kwargs,
             'time': time.time(),
         }
         if ATTR_RGB_COLOR in kwargs:
             self._attr_color_mode = ColorMode.RGB
-        elif ATTR_COLOR_TEMP in kwargs:
+        elif (ATTR_COLOR_TEMP_KELVIN in kwargs) or ('color_temp' in kwargs):
             self._attr_color_mode = ColorMode.COLOR_TEMP
         else:
-            self._attr_color_mode = None
+            if ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+            elif ColorMode.RGB in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.RGB
+            elif ColorMode.BRIGHTNESS in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.BRIGHTNESS
+            elif ColorMode.ONOFF in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.ONOFF
+            else:
+                self._attr_color_mode = None
         return await self.async_turn(kwargs[self._name], **kwargs)
 
     async def async_turn_off(self, **kwargs):
-        """Turn the entity off."""
         return await self.async_turn(False, **kwargs)
 
     async def async_turn(self, on=True, **kwargs):
-        """Turn the entity on/off."""
         kwargs[self._name] = on
         ret = await self.device_send_props(kwargs)
         if ret:
@@ -146,3 +180,40 @@ class XLightEntity(XEntity, LightEntity):
         if self.target_task:
             self.target_task.cancel()
         await super().async_will_remove_from_hass()
+
+    @callback
+    def async_restore_last_state(self, state: str, attrs: dict):
+        self._attr_is_on = state == 'on'
+        if ATTR_BRIGHTNESS in attrs:
+            self._attr_brightness = attrs.get(ATTR_BRIGHTNESS)
+        kelvin = attrs.get(ATTR_COLOR_TEMP_KELVIN)
+        if kelvin is not None:
+            try:
+                self._attr_color_temp_kelvin = int(kelvin)
+                self._attr_color_temp = int(1000000 / float(self._attr_color_temp_kelvin))
+            except Exception:
+                pass
+        ct = attrs.get('color_temp')
+        if ct is not None:
+            try:
+                self._attr_color_temp = int(ct)
+                self._attr_color_temp_kelvin = int(1000000 / float(self._attr_color_temp))
+            except Exception:
+                pass
+        rgb = attrs.get(ATTR_RGB_COLOR)
+        if rgb is not None:
+            self._attr_rgb_color = rgb
+            self._attr_color_mode = ColorMode.RGB
+        elif (self._attr_color_temp_kelvin is not None) or (self._attr_color_temp is not None):
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+        elif self._attr_brightness is not None:
+            self._attr_color_mode = ColorMode.BRIGHTNESS
+        elif self._attr_is_on:
+            if ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.COLOR_TEMP
+            elif ColorMode.RGB in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.RGB
+            elif ColorMode.BRIGHTNESS in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.BRIGHTNESS
+            elif ColorMode.ONOFF in self._attr_supported_color_modes:
+                self._attr_color_mode = ColorMode.ONOFF
