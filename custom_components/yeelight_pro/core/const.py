@@ -4,6 +4,7 @@ DOMAIN = 'yeelight_pro'
 DEFAULT_NAME = 'Yeelight Pro'
 
 CONF_GATEWAYS = 'gateways'
+CONF_PID = 'pid'
 
 SUPPORTED_DOMAINS = [
     'button',
@@ -21,6 +22,11 @@ SUPPORTED_DOMAINS = [
 PID_GATEWAY = 1
 PID_WIFI_PANEL = 2
 PID_CURTAIN = "curtain" 
+
+GATEWAY_TYPES = {
+    PID_GATEWAY: 'Gateway Pro (网关)',
+    PID_WIFI_PANEL: 'Wifi Panel (全面屏)',
+}
 
 SERVICE_SET_POSITION = "set_cover_position"
 
